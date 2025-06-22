@@ -1,0 +1,191 @@
+#property strict
+input int SSMA_Period = 2;
+input double BaseRiskPercent = 1.0; // % of balance to risk
+input double RewardRatio = 3.0; // Risk:Reward Ratio
+input int Slippage = 3;
+input int MagicNumber = 123456;
+input double InitialSL_Pips = 500;
+input double TrailStartPips = 50;
+input double TrailStepPips = 30;
+input bool EnableTrailing = true; // Enable/Disable trailing
+input bool TrailAfterRRReached = true; // Only trail after Reward Ratio reached
+input double MaxLotSize = 0.20; // Cap lot size
+input bool DebugPrint = true; // Show risk details
+input int ATR_Period = 14;
+int tradeTicket = -1;
+bool isBuy = false;
+double lastProfit = 0;
+//+------------------------------------------------------------------+
+int OnInit() {
+return INIT_SUCCEEDED;
+}
+//+------------------------------------------------------------------+
+void OnTick() {
+double ssmaCurrent = iMA(Symbol(), 0, SSMA_Period, 0, MODE_SMA, PRICE_CLOSE, 0);
+double ssmaPrevious = iMA(Symbol(), 0, SSMA_Period, 0, MODE_SMA, PRICE_CLOSE, 1);
+if (!PositionOpen()) {
+bool useRecovery = ShouldUseRecoveryLot();
+double riskAmount = GetRiskAmount();
+double lotSize = CalculateLotSize(riskAmount);
+if (DebugPrint) {
+Print("Equity:", AccountEquity(), ", RiskAmount:", riskAmount, ", LotSize:", lotSize);
+}
+if (Close[1] > ssmaPrevious && Close[0] > ssmaCurrent) {
+OpenBuy(lotSize);
+} else if (Close[1] < ssmaPrevious && Close[0] < ssmaCurrent) {
+OpenSell(lotSize);
+}
+} else {
+if (EnableTrailing) ManageTrailingStop();
+if (isBuy && Close[1] < ssmaPrevious && Close[0] < ssmaCurrent) {
+CloseTrade();
+}
+if (!isBuy && Close[1] > ssmaPrevious && Close[0] > ssmaCurrent) {
+CloseTrade();
+}
+}
+}
+
+//+------------------------------------------------------------------+
+bool ShouldUseRecoveryLot() {
+datetime lastCloseTime = 0;
+double lastTradeProfit = 0;
+for (int i = OrdersHistoryTotal() - 1; i >= 0; i--) {
+if (OrderSelect(i, SELECT_BY_POS, MODE_HISTORY)) {
+if (OrderSymbol() == Symbol() && OrderMagicNumber() == MagicNumber &&
+(OrderType() == OP_BUY || OrderType() == OP_SELL)) {
+if (OrderCloseTime() > lastCloseTime) {
+lastCloseTime = OrderCloseTime();
+lastTradeProfit = OrderProfit() + OrderSwap() + OrderCommission();
+}
+}
+}
+}
+if (lastCloseTime > 0 && lastTradeProfit < 0) {
+double currentVolume = iVolume(Symbol(), PERIOD_M1, 0);
+double avgVolume = 0;
+for (int i = 1; i <= 10; i++) {
+avgVolume += iVolume(Symbol(), PERIOD_M1, i);
+}
+avgVolume /= 10;
+bool isBuyCandle = Close[0] > Open[0];
+bool isSellCandle = Close[0] < Open[0];
+bool highBuyVolume = isBuyCandle && currentVolume > 1.2 * avgVolume;
+bool highSellVolume = isSellCandle && currentVolume > 1.2 * avgVolume;
+double atr = iATR(Symbol(), PERIOD_M1, ATR_Period, 0);
+double atrPips = atr / Point;
+bool notSideways = atrPips > 3.0;
+return (highBuyVolume || highSellVolume || notSideways);
+}
+return false;
+}
+//+------------------------------------------------------------------+
+double GetRiskAmount() {
+double baseRisk = BaseRiskPercent / 100.0 * AccountBalance();
+return (lastProfit > 0) ? baseRisk + lastProfit : baseRisk;
+}
+//+------------------------------------------------------------------+
+double CalculateLotSize(double riskAmount) {
+double slPips = InitialSL_Pips;
+double tickValuePerLot = MarketInfo(Symbol(), MODE_TICKVALUE) * 10;
+double lotSize = (riskAmount / (slPips * tickValuePerLot));
+lotSize = MathMax(MarketInfo(Symbol(), MODE_MINLOT), lotSize);
+lotSize = MathMin(MaxLotSize, lotSize);
+return NormalizeDouble(lotSize, 2);
+}
+
+//+------------------------------------------------------------------+
+bool PositionOpen() {
+for (int i = OrdersTotal() - 1; i >= 0; i--) {
+if (OrderSelect(i, SELECT_BY_POS, MODE_TRADES)) {
+if (OrderMagicNumber() == MagicNumber && OrderSymbol() == Symbol()) {
+tradeTicket = OrderTicket();
+isBuy = OrderType() == OP_BUY;
+return true;
+}
+}
+}
+tradeTicket = -1;
+return false;
+}
+//+------------------------------------------------------------------+
+void OpenBuy(double lot) {
+double sl = Ask - InitialSL_Pips * Point;
+double tp = Ask + (InitialSL_Pips * RewardRatio) * Point;
+tradeTicket = OrderSend(Symbol(), OP_BUY, lot, Ask, Slippage, sl, tp, "Buy", MagicNumber,
+0, clrBlue);
+if (tradeTicket > 0) {
+isBuy = true;
+Print("Buy order opened with lot: ", lot);
+} else {
+Print("Error opening Buy: ", GetLastError());
+}
+}
+//+------------------------------------------------------------------+
+void OpenSell(double lot) {
+double sl = Bid + InitialSL_Pips * Point;
+double tp = Bid - (InitialSL_Pips * RewardRatio) * Point;
+tradeTicket = OrderSend(Symbol(), OP_SELL, lot, Bid, Slippage, sl, tp, "Sell", MagicNumber,
+0, clrRed);
+if (tradeTicket > 0) {
+isBuy = false;
+Print("Sell order opened with lot: ", lot);
+} else {
+Print("Error opening Sell: ", GetLastError());
+}
+}
+//+------------------------------------------------------------------+
+void CloseTrade() {
+if (OrderSelect(tradeTicket, SELECT_BY_TICKET)) {
+bool result;
+if (OrderType() == OP_BUY) {
+result = OrderClose(tradeTicket, OrderLots(), Bid, Slippage, clrRed);
+} else {
+result = OrderClose(tradeTicket, OrderLots(), Ask, Slippage, clrBlue);
+}
+if (result) {
+lastProfit = OrderProfit() + OrderSwap() + OrderCommission();
+Print("Trade closed: ", tradeTicket, " with P/L: ", lastProfit);
+tradeTicket = -1;
+
+} else {
+Print("Error closing trade: ", GetLastError());
+}
+}
+}
+//+------------------------------------------------------------------+
+void ManageTrailingStop() {
+if (OrderSelect(tradeTicket, SELECT_BY_TICKET)) {
+double priceMove, newSL;
+double targetPips = InitialSL_Pips * RewardRatio;
+if (isBuy) {
+priceMove = Bid - OrderOpenPrice();
+if (!TrailAfterRRReached || priceMove >= targetPips * Point) {
+if (priceMove > TrailStartPips * Point) {
+newSL = Bid - TrailStepPips * Point;
+if (newSL > OrderStopLoss()) {
+bool modified = OrderModify(tradeTicket, OrderOpenPrice(), newSL,
+
+OrderTakeProfit(), 0, clrBlue);
+if (!modified)
+Print("Error modifying Buy SL: ", GetLastError());
+}
+}
+}
+} else {
+priceMove = OrderOpenPrice() - Ask;
+if (!TrailAfterRRReached || priceMove >= targetPips * Point) {
+if (priceMove > TrailStartPips * Point) {
+newSL = Ask + TrailStepPips * Point;
+if (newSL < OrderStopLoss() || OrderStopLoss() == 0) {
+bool modified = OrderModify(tradeTicket, OrderOpenPrice(), newSL,
+
+OrderTakeProfit(), 0, clrRed);
+if (!modified)
+Print("Error modifying Sell SL: ", GetLastError());
+}
+}
+}
+}
+}
+}

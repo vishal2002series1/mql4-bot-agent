@@ -1,0 +1,5 @@
+dotenv
+boto3
+requests
+beautifulsoup4
+lxml
